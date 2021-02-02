@@ -7,7 +7,7 @@ import (
 )
 
 //lifetime of records..
-const RECORD_DURATION = 10 * time.Second
+const RecordDuration = 10 * time.Second
 
 //AccountReserved lists all reserved licenses for an account and appID
 type AccountReserved struct {
@@ -60,7 +60,7 @@ func (license *License) incrementExpirationTimeOnSetRecord(db *Database) (bool, 
 	if err != nil {
 		return false, err
 	}
-	newTTL := ttl.Add(RECORD_DURATION) //increment time
+	newTTL := ttl.Add(RecordDuration) //increment time
 	license.ExpiresAt = newTTL.Format(time.RFC3339)
 	jsonLicense, err := license.marshalToJSON()
 	if err != nil {
@@ -89,7 +89,7 @@ func (license *License) marshalToJSON() ([]byte, error) {
 
 //CreateReservation reserves a license for app / user / account
 func (db *Database) CreateReservation(license *License) error {
-	ttl := time.Now().Add(RECORD_DURATION)
+	ttl := time.Now().Add(RecordDuration)
 	license.ExpiresAt = ttl.Format(time.RFC3339)
 	licenseJSON, err := json.Marshal(license)
 	if err != nil {
