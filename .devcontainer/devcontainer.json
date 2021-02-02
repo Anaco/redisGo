@@ -1,0 +1,15 @@
+{
+    "name": "GoDevEnv",
+    "dockerFile": "Dockerfile",
+    "appPort": [3000],
+    "settings": {
+        "workbench.colorTheme": "Night Owl",
+        "terminal.integrated.shell.osx": "/bin/bash"
+    },
+    "extensions": [
+        "sdras.night-owl",
+        "golang.go",
+        "ms-azuretools.vscode-docker"
+    ]
+
+}
