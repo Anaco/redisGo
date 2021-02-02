@@ -6,6 +6,15 @@ import (
 	"time"
 )
 
+//lifetime of records..
+const RECORD_DURATION = 10 * time.Second
+
+//AccountReserved lists all reserved licenses for an account and appID
+type AccountReserved struct {
+	Count   int `json:"count"`
+	License []*License
+}
+
 //License struct representing the license object
 type License struct {
 	AccountID string `json:"accountId" binding:"required"`
@@ -15,9 +24,23 @@ type License struct {
 	ExpiresAt string `json:"expires,omitempty"`
 }
 
+//getPrimaryRecordKey returns the primary key for the set
+func (license *License) getPrimaryRecordKey() string {
+	return license.AccountID + "#" + license.AppID
+}
+
+//getTTLTime converts string time into time object
+func (license *License) getTTLTime() (time.Time, error) {
+	duration, err := time.Parse(time.RFC3339, license.ExpiresAt)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return duration, nil
+}
+
 //IsLicenseExpired checks if a license is expired based on ExpiresOn field, returns true if expired, along with the time.Time object
-func (license *License) IsLicenseExpired() (bool, time.Time, error) {
-	ttl, err := time.Parse(time.RFC3339, license.ExpiresAt) //convert string to time
+func (license *License) isLicenseExpired() (bool, time.Time, error) {
+	ttl, err := license.getTTLTime() //convert string to time
 	if err != nil {
 		return true, time.Time{}, err
 	}
@@ -32,20 +55,20 @@ func (license *License) IsLicenseExpired() (bool, time.Time, error) {
 }
 
 //IncrementExpirationTimeOnSetRecord bumps the expiration time, and updates the set record
-func (license *License) IncrementExpirationTimeOnSetRecord(db *Database) (bool, error) {
-	ttl, err := time.Parse(time.RFC3339, license.ExpiresAt) //convert string to time
+func (license *License) incrementExpirationTimeOnSetRecord(db *Database) (bool, error) {
+	ttl, err := license.getTTLTime() //convert string to time
 	if err != nil {
 		return false, err
 	}
-	newTTL := ttl.Add(15 * time.Minute) //increment time
+	newTTL := ttl.Add(RECORD_DURATION) //increment time
 	license.ExpiresAt = newTTL.Format(time.RFC3339)
-	jsonLicense, err := license.MarshalToJSON()
+	jsonLicense, err := license.marshalToJSON()
 	if err != nil {
 		return false, err
 	}
 
 	pipe := db.Client.TxPipeline()
-	pipe.HSet(licensePrefix+license.AccountID+license.AppID, license.UserID, jsonLicense)
+	pipe.HSet(license.getPrimaryRecordKey(), license.UserID, jsonLicense)
 	_, err = pipe.Exec()
 	if err != nil {
 		return false, err
@@ -56,7 +79,7 @@ func (license *License) IncrementExpirationTimeOnSetRecord(db *Database) (bool, 
 }
 
 //MarshalToJSON converts the license to json, and returns the byte array
-func (license *License) MarshalToJSON() ([]byte, error) {
+func (license *License) marshalToJSON() ([]byte, error) {
 	jsonObject, err := json.Marshal(license)
 	if err != nil {
 		return nil, err
@@ -64,17 +87,9 @@ func (license *License) MarshalToJSON() ([]byte, error) {
 	return jsonObject, nil
 }
 
-//AccountReserved lists all reserved licenses for an account and appID
-type AccountReserved struct {
-	Count   int `json:"count"`
-	License []*License
-}
-
-const licensePrefix string = "reserved:"
-
 //CreateReservation reserves a license for app / user / account
 func (db *Database) CreateReservation(license *License) error {
-	ttl := time.Now().Add(30 * time.Second)
+	ttl := time.Now().Add(RECORD_DURATION)
 	license.ExpiresAt = ttl.Format(time.RFC3339)
 	licenseJSON, err := json.Marshal(license)
 	if err != nil {
@@ -82,7 +97,7 @@ func (db *Database) CreateReservation(license *License) error {
 	}
 	fmt.Printf("JSON: %v", licenseJSON)
 	pipe := db.Client.TxPipeline()
-	pipe.HSet(licensePrefix+license.AccountID+license.AppID, license.UserID, string(licenseJSON)) // trying to use hashSet for storing the items..
+	pipe.HSet(license.getPrimaryRecordKey(), license.UserID, string(licenseJSON)) // trying to use hashSet for storing the items..
 	_, err = pipe.Exec()
 	if err != nil {
 		return err
@@ -93,13 +108,15 @@ func (db *Database) CreateReservation(license *License) error {
 
 //FetchAccountReservations fetches all of an account + app reservervations
 func (db *Database) FetchAccountReservations(account string, appID string) (*AccountReserved, error) {
-	reservationEntries := db.Client.HGetAll(licensePrefix + account + appID)
+	reservationEntries := db.Client.HGetAll(account + "#" + appID)
 	if reservationEntries == nil {
 		return nil, ErrNil
 	}
 	count := len(reservationEntries.Val())
 	//create the new collection to be returned
 	licenses := make([]*License, count)
+	//expired licenses
+	var expiredLicense []*License
 	//index of the collection
 	idx := 0
 	for _, value := range reservationEntries.Val() {
@@ -111,7 +128,7 @@ func (db *Database) FetchAccountReservations(account string, appID string) (*Acc
 			return nil, err
 		}
 		//convert the json.number type to int64
-		isExpired, _, err := licenseObj.IsLicenseExpired()
+		isExpired, _, err := licenseObj.isLicenseExpired()
 		if err != nil {
 			return nil, err
 		}
@@ -119,10 +136,15 @@ func (db *Database) FetchAccountReservations(account string, appID string) (*Acc
 			//push it into the collection
 			licenses[idx] = &licenseObj
 			idx++
+		} else {
+			expiredLicense = append(expiredLicense, &licenseObj)
 		}
 		//cleanup the expired records...
+		db.expireReservedLicenses(expiredLicense)
 	}
-
+	if idx == 0 {
+		return nil, ErrNil
+	}
 	reservationEntryResponse := &AccountReserved{Count: idx, License: licenses}
 	return reservationEntryResponse, nil
 
@@ -130,7 +152,7 @@ func (db *Database) FetchAccountReservations(account string, appID string) (*Acc
 
 //FetchUserReservation fetch a user's reserved license if found and not expired.
 func (db *Database) FetchUserReservation(userID string, appID string, accountID string) (*License, error) {
-	userLicense := db.Client.HGet(licensePrefix+accountID+appID, userID)
+	userLicense := db.Client.HGet(accountID+"#"+appID, userID)
 	if userLicense == nil {
 		return nil, ErrNil
 	}
@@ -140,7 +162,7 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 		return nil, err
 	}
 	fmt.Printf("License Found: %v\n", userLicense)
-	isExpired, _, err := license.IsLicenseExpired()
+	isExpired, _, err := license.isLicenseExpired()
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +171,7 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 		return nil, ErrNil
 	}
 	// increment the expiriation time of the reservation
-	_, err = license.IncrementExpirationTimeOnSetRecord(db)
+	_, err = license.incrementExpirationTimeOnSetRecord(db)
 	if err != nil {
 		return nil, err
 	}
@@ -158,48 +180,17 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 
 }
 
-// //ReserveLicense saves a license to redis
-// func (db *Database) ReserveLicense(license *License) error {
-// 	//set the record expiration time from now
-// 	ttl := time.Now().Add(10 * time.Minute)
-// 	license.ExpiresAt = ttl.Local().Format("3:04PM")
-// 	//serialize License obj to JSON
-// 	licenseJSON, err := json.Marshal(license)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	// Set Obj
-// 	err = db.Client.Set(licensePrefix+license.UserID+license.AppID, licenseJSON, 0).Err()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	//setting ttl on the inital set only takes duration, instead we set an exact time for expiration
-// 	err = db.Client.ExpireAt(licensePrefix+license.UserID+license.AppID, ttl).Err()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
+//expiredReservedLicenses removes licenses from the redis set
+func (db *Database) expireReservedLicenses(expired []*License) error {
+	pipe := db.Client.TxPipeline()
+	for _, value := range expired {
+		fmt.Printf("Removing: %d\n\n", value)
+		pipe.HDel(value.getPrimaryRecordKey(), value.UserID)
+	}
+	_, err := pipe.Exec()
+	if err != nil {
+		return err
+	}
 
-// //FetchReservedLicense returns records for a given userID if they exist
-// func (db *Database) FetchReservedLicense(recordID string) (*License, error) {
-// 	s, err := db.Client.Get(licensePrefix + recordID).Result()
-// 	if err == redis.Nil {
-// 		fmt.Printf("License for %v does not exist", recordID)
-// 		return nil, ErrNil
-// 	} else if err != nil {
-// 		return nil, err
-// 	}
-// 	license := License{}
-// 	err = json.Unmarshal([]byte(s), &license)
-// 	//calculate new ttl from current time
-// 	ttl := time.Now().Add(10 * time.Minute)
-// 	//reup the expiration time by the duration of life
-// 	err = db.Client.ExpireAt(licensePrefix+recordID, ttl).Err()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	//update the expiresAt with new ttl
-// 	license.ExpiresAt = ttl.Local().Format("3:04PM")
-// 	return &license, nil
-// }
+	return nil
+}
