@@ -15,6 +15,55 @@ type License struct {
 	ExpiresAt string `json:"expires,omitempty"`
 }
 
+//IsLicenseExpired checks if a license is expired based on ExpiresOn field, returns true if expired, along with the time.Time object
+func (license *License) IsLicenseExpired() (bool, time.Time, error) {
+	ttl, err := time.Parse(time.RFC3339, license.ExpiresAt) //convert string to time
+	if err != nil {
+		return true, time.Time{}, err
+	}
+	timeDiff := time.Now().Sub(ttl)
+
+	if timeDiff < 0 { //if positive ttl is in the past
+		return false, ttl, nil //license not expired
+	}
+	//time.Time{} returns ZeroTime, which is nil time
+	return true, time.Time{}, nil //license is expired
+
+}
+
+//IncrementExpirationTimeOnSetRecord bumps the expiration time, and updates the set record
+func (license *License) IncrementExpirationTimeOnSetRecord(db *Database) (bool, error) {
+	ttl, err := time.Parse(time.RFC3339, license.ExpiresAt) //convert string to time
+	if err != nil {
+		return false, err
+	}
+	newTTL := ttl.Add(15 * time.Minute) //increment time
+	license.ExpiresAt = newTTL.Format(time.RFC3339)
+	jsonLicense, err := license.MarshalToJSON()
+	if err != nil {
+		return false, err
+	}
+
+	pipe := db.Client.TxPipeline()
+	pipe.HSet(licensePrefix+license.AccountID+license.AppID, license.UserID, jsonLicense)
+	_, err = pipe.Exec()
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+
+}
+
+//MarshalToJSON converts the license to json, and returns the byte array
+func (license *License) MarshalToJSON() ([]byte, error) {
+	jsonObject, err := json.Marshal(license)
+	if err != nil {
+		return nil, err
+	}
+	return jsonObject, nil
+}
+
 //AccountReserved lists all reserved licenses for an account and appID
 type AccountReserved struct {
 	Count   int `json:"count"`
@@ -62,7 +111,7 @@ func (db *Database) FetchAccountReservations(account string, appID string) (*Acc
 			return nil, err
 		}
 		//convert the json.number type to int64
-		isExpired, _, err := licenseObj.isLicenseExpired()
+		isExpired, _, err := licenseObj.IsLicenseExpired()
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +140,7 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 		return nil, err
 	}
 	fmt.Printf("License Found: %v\n", userLicense)
-	isExpired, _, err := license.isLicenseExpired()
+	isExpired, _, err := license.IsLicenseExpired()
 	if err != nil {
 		return nil, err
 	}
@@ -99,24 +148,13 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 		//TODO: try to fetch a new free license?
 		return nil, ErrNil
 	}
-	//TODO: need to increment the expiriation time of the reservation
-	return &license, nil
-
-}
-
-//Checks if a license is expired based on ExpiresOn field, returns true if expired, along with the time.Time object
-func (license *License) isLicenseExpired() (bool, time.Time, error) {
-	ttl, err := time.Parse(time.RFC3339, license.ExpiresAt) //convert string to time
+	// increment the expiriation time of the reservation
+	_, err = license.IncrementExpirationTimeOnSetRecord(db)
 	if err != nil {
-		return true, time.Time{}, err
+		return nil, err
 	}
-	timeDiff := time.Now().Sub(ttl)
 
-	if timeDiff < 0 { //if positive ttl is in the past
-		return false, ttl, nil //license not expired
-	}
-	//time.Time{} returns ZeroTime, which is nil time
-	return true, time.Time{}, nil //license is expired
+	return &license, nil
 
 }
 
