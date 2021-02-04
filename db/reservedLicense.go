@@ -184,7 +184,7 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 func (db *Database) expireReservedLicenses(expired []*License) error {
 	pipe := db.Client.TxPipeline()
 	for _, value := range expired {
-		fmt.Printf("Removing: %d\n\n", value)
+		fmt.Printf("Removing: %v\n\n", value)
 		pipe.HDel(value.getPrimaryRecordKey(), value.UserID)
 	}
 	_, err := pipe.Exec()

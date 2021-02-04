@@ -9,7 +9,8 @@ import (
 
 //Database struct to wrap the redis client
 type Database struct {
-	Client *redis.Client
+	Client   *redis.Client
+	DynamoDb *DynamoDbClient
 }
 
 var (
@@ -20,7 +21,7 @@ var (
 )
 
 //NewDatabase sets up a new connection, and checks it using Ping
-func NewDatabase(address string) (*Database, error) {
+func NewDatabase(address string, ddbClient *DynamoDbClient) (*Database, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:     address,
 		Password: "",
@@ -30,6 +31,7 @@ func NewDatabase(address string) (*Database, error) {
 		return nil, err
 	}
 	return &Database{
-		Client: client,
+		Client:   client,
+		DynamoDb: ddbClient,
 	}, nil
 }

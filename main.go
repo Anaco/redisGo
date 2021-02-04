@@ -16,7 +16,11 @@ var (
 )
 
 func main() {
-	database, err := db.NewDatabase(RedisAddr)
+	ddbClient, err := db.NewDynamoDbClient("GemsAccountTable")
+	if err != nil {
+		log.Fatalf("Failed to create Dynamo Document Client, %s", err.Error())
+	}
+	database, err := db.NewDatabase(RedisAddr, ddbClient)
 	if err != nil {
 		log.Fatalf("Failed to connect to redis: %s", err.Error())
 	}
