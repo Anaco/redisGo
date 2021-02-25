@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-//lifetime of records..
+//RecordDuration lifetime of records..
 const RecordDuration = 10 * time.Second
 
 //AccountReserved lists all reserved licenses for an account and appID
@@ -20,7 +20,6 @@ type License struct {
 	AccountID string `json:"accountId" binding:"required"`
 	AppID     string `json:"appId" binding:"required"`
 	UserID    string `json:"userId" binding:"required"`
-	Features  string `json:"features" binding:"required"`
 	ExpiresAt string `json:"expires,omitempty"`
 }
 
@@ -87,23 +86,23 @@ func (license *License) marshalToJSON() ([]byte, error) {
 	return jsonObject, nil
 }
 
-//CreateReservation reserves a license for app / user / account
-func (db *Database) CreateReservation(license *License) error {
+//CreateReservation reserves a license for app / user / account returns true if successful
+func (db *Database) CreateReservation(license *License) (*License, error) {
 	ttl := time.Now().Add(RecordDuration)
 	license.ExpiresAt = ttl.Format(time.RFC3339)
 	licenseJSON, err := json.Marshal(license)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	fmt.Printf("JSON: %v", licenseJSON)
 	pipe := db.Client.TxPipeline()
 	pipe.HSet(license.getPrimaryRecordKey(), license.UserID, string(licenseJSON)) // trying to use hashSet for storing the items..
+	fmt.Printf("user: %v pK: %v \n\n",license.UserID,license.getPrimaryRecordKey())
 	_, err = pipe.Exec()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return license, nil
 }
 
 //FetchAccountReservations fetches all of an account + app reservervations
@@ -139,8 +138,12 @@ func (db *Database) FetchAccountReservations(account string, appID string) (*Acc
 		} else {
 			expiredLicense = append(expiredLicense, &licenseObj)
 		}
+	}
+	//If we have some expired licenses prune them
+	if(len(expiredLicense) > 0){
 		//cleanup the expired records...
 		db.expireReservedLicenses(expiredLicense)
+		expiredLicense = nil
 	}
 	if idx == 0 {
 		return nil, ErrNil
@@ -153,7 +156,7 @@ func (db *Database) FetchAccountReservations(account string, appID string) (*Acc
 //FetchUserReservation fetch a user's reserved license if found and not expired.
 func (db *Database) FetchUserReservation(userID string, appID string, accountID string) (*License, error) {
 	userLicense := db.Client.HGet(accountID+"#"+appID, userID)
-	if userLicense == nil {
+	if userLicense.Val() == "" {
 		return nil, ErrNil
 	}
 	license := License{}
@@ -167,17 +170,42 @@ func (db *Database) FetchUserReservation(userID string, appID string, accountID 
 		return nil, err
 	}
 	if isExpired { //license is expired, just return not found
-		//TODO: try to fetch a new free license?
-		return nil, ErrNil
+		fmt.Printf("License was expired attempting refresh.... on %v \n\n", license)
+		db.expireReservedLicense(&license) // remove the expired license from the db
+		licenseObj, err := db.CreateReservation(&license) //try to get a new license from a copy of the old one
+		if(licenseObj == nil || err != nil){ //if failed or there was an error bail out
+			fmt.Printf("After Refresh Attempt %v", err)
+			return nil, err
+		}
+		fmt.Printf("License was successfully renewed: %v", licenseObj)
+		return licenseObj, nil //return the new license
 	}
 	// increment the expiriation time of the reservation
-	_, err = license.incrementExpirationTimeOnSetRecord(db)
+	_, err = license.incrementExpirationTimeOnSetRecord(db) //increment the expiration time of the found active license
 	if err != nil {
 		return nil, err
 	}
 
 	return &license, nil
 
+}
+//ReturnUserLicense allows the user to unclaim a claimed license.
+func (db *Database) ReturnUserLicense(userID string, appID string, accountID string) error {
+	userLicense := db.Client.HGet(accountID+"#"+appID,userID) //pull the user's license from the hset
+	if userLicense.Val() == "" {
+		return ErrNil
+	}
+	license:= License{}
+	err:= json.Unmarshal([]byte(userLicense.Val()), &license) //convert to License interface for easier use
+	if err != nil {
+		return err
+	}
+	_,err = db.Client.HDel(license.getPrimaryRecordKey(),license.UserID).Result()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 //expiredReservedLicenses removes licenses from the redis set
@@ -193,4 +221,17 @@ func (db *Database) expireReservedLicenses(expired []*License) error {
 	}
 
 	return nil
+}
+
+func (db *Database) expireReservedLicense(license *License) error {
+	pipe := db.Client.TxPipeline()
+	pipe.HDel(license.getPrimaryRecordKey(),license.UserID)
+
+	_, err := pipe.Exec()
+	if err != nil {
+		return err
+	}
+
+	return nil
+
 }

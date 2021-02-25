@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/anaco/redisGo/db"
 	"github.com/gin-gonic/gin"
+	cors "github.com/rs/cors/wrapper/gin"
 )
 
 var (
@@ -31,13 +33,14 @@ func main() {
 //initRouter register routes with the app
 func initRouter(database *db.Database) *gin.Engine {
 	r := gin.Default()
+	r.Use(cors.Default())
 	r.POST("/license/claim", func(c *gin.Context) {
 		var licenseJSON db.License
 		if err := c.ShouldBindJSON(&licenseJSON); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		err := database.CreateReservation(&licenseJSON)
+		_, err := database.CreateReservation(&licenseJSON)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -79,16 +82,34 @@ func initRouter(database *db.Database) *gin.Engine {
 		accountID := c.Query("accountID")
 		userID := c.Query("userID")
 		license, err := database.FetchUserReservation(userID, appID, accountID)
+		fmt.Printf("License:: %v", err)
 		if err != nil {
 			if err == db.ErrNil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "No records found for " + userID + " " + appID})
 				return
 			} else {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"license": license})
-		return
+	})
+	r.POST("/license/user/freeLicense", func(c *gin.Context){
+		appID := c.Query("appID")
+		accountID := c.Query("accountID")
+		userID := c.Query("userID")
+		err := database.ReturnUserLicense(userID, appID, accountID)
+		if err != nil {
+			if err == db.ErrNil{
+				c.JSON(http.StatusNotFound, gin.H{"error":"No record found to revoke"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not revoke license"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "License revoked successfully"})
+
 	})
 	//FetchReserveLicense Endpoint
 	// r.GET("/license/fetch", func(c *gin.Context) {
